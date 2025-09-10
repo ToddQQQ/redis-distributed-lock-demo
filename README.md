@@ -80,3 +80,112 @@ end
 - 因此：红锁并不常用。大多数公司：
   - 要么用 Redis 基础命令封装简单锁；
   - 要么直接使用 Redisson 框架。
+
+
+
+
+
+
+
+
+
+
+
+# Distributed Lock
+
+## How to implement a Redis-based distributed lock?
+
+---
+
+### 1. Acquire Lock
+- Use command: `SET key value NX PX ttl`
+  - `NX`: ensures mutual exclusion (only set if the key does not exist).
+  - `PX`: sets an expiration time to avoid deadlocks if the client crashes.
+- Redis executes commands in a single thread → this command is atomic by nature.
+
+---
+
+### 2. Release Lock
+- Only the lock owner should be able to release it → this requires atomicity.
+- Solution: use a Lua script to check ownership and delete in one step:
+
+```lua
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+```
+
+### 3. Expiration and Watchdog
+- If the client crashes, the lock will expire automatically (avoids deadlock).
+- Problem: if the business logic takes longer than TTL, the lock may expire too early and another client can acquire it.
+- Solution: **Watchdog mechanism** (used by Redisson).
+  - After acquiring the lock, a background **daemon thread** periodically calls `PEXPIRE` to extend the TTL.
+  - If the business thread is alive → the lock remains valid.
+  - If the business thread crashes → JVM stops the daemon thread, the lock will eventually expire and be released.
+
+---
+
+### 4. Reentrant Lock
+- A thread might need to acquire the same lock multiple times (e.g., method A calls method B, both require the same lock).
+- Local locks (e.g., `ReentrantLock`) solve this with a counter: +1 on reentry, -1 on release.
+- Distributed lock needs a similar mechanism.
+- Redisson’s approach:
+  - Use a **Redis Hash**:
+    - **Key**: lock name
+    - **Field**: thread identifier (UUID + ThreadId, to avoid collisions in clusters)
+    - **Value**: reentry count
+  - On reentry: counter +1
+  - On release: counter -1
+  - Lock is fully released when counter = 0.
+
+---
+
+### 5. Blocking Lock
+- If a thread fails to acquire the lock:
+  - **Simple implementation**: spin and retry (busy-wait).
+  - **Redisson’s implementation**:
+    - Threads that fail to acquire subscribe to a channel and block.
+    - When the lock is released, the holder publishes a message.
+    - Subscribers wake up and retry acquiring the lock.
+    - A timeout can be set to avoid infinite waiting.
+
+---
+
+### 6. Master-Slave Replication Issue
+- Redis replication is **asynchronous**:
+  - A client sets the lock on the master.
+  - The master crashes before replicating to the slave.
+  - The slave gets promoted to master → lock data is lost.
+  - Another client may acquire the lock, violating mutual exclusion.
+- Solution: acquire the lock **consistently across multiple masters**.
+
+---
+
+### 7. RedLock
+- Proposed by Redis’ creator (**Antirez**).
+- Deploy multiple **independent Redis masters**.
+- Acquire lock on a **majority** of masters to succeed.
+- If lock attempts take too long → give up.
+- **Advantages**:
+  - Provides stronger guarantees in multi-master setups.
+- **Drawbacks**:
+  - Clock drift across nodes may break safety.
+  - JVM GC pauses may cause the watchdog to miss renewals, leading to premature expiration.
+  - Operating multiple independent masters is complex and costly.
+- **Conclusion**: RedLock is **not commonly used** in practice.  
+  Most companies:
+  - Either build simple distributed locks with Redis primitives.
+  - Or use frameworks like **Redisson**.
+
+---
+
+
+1. Acquire: `SET key value NX PX ttl` (atomic).  
+2. Release: check ownership + delete with Lua (atomic).  
+3. Expiration → Watchdog renews TTL (daemon thread).  
+4. Reentrant lock → Redis Hash counter (Redisson).  
+5. Blocking → Spin or Pub/Sub notify (Redisson).  
+6. Master-slave replication risk → need multi-master strategy.  
+7. RedLock → majority success, but issues with clock drift and complexity → rarely used.  
