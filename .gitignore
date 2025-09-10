@@ -1,0 +1,17 @@
+# IDEA
+.idea/
+*.iml
+
+# Build
+/out/
+/target/
+
+# OS
+.DS_Store
+
+# Libs (不要上传本地 jar)
+libs/
+
+# Logs
+*.log
+*.class
