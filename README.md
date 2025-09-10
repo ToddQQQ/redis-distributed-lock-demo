@@ -1,3 +1,5 @@
+分布式锁
+
 怎么实现一个 Redis 分布式锁？
 	1.	加锁
 	•	用 SET key value NX PX ttl：NX 确保互斥，PX 确保自动过期。
